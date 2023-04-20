@@ -1,0 +1,309 @@
+# Code for newDISC and private assessment (code for public assessment and oldDISC adjusted and saved in separate files)
+using Random, StatsBase, ProgressBars, Statistics, Plots, DataFrames, CSV
+
+# Export data to CSV 
+all_freqs = []
+
+######################################FUNCTIONS#################################################################
+
+# Donation game play
+function process_interactions(person, interactions, interactions_bool, actions, strategies, reputations)
+    for j in interactions
+        # Call the new i value since shuffled
+        interactions_bool[person, j] = 1
+        interactions_bool[j, person] = 1
+        # Both individuals simultaneously decide to cooperate or defect in game
+        # Player i
+        if strategies[person] == 1          # ALLC
+            if rand() > e1                  # Action error
+                actions[person, j] = 1
+            else
+                actions[person, j] = 0
+            end
+        elseif strategies[person] == 2      # ALLD
+            if rand() > e1
+                actions[person, j] = 0
+            else
+                actions[person, j] = 1
+            end
+        elseif strategies[person] == 3      # NEW_DISC
+            if (rand() > reputations[person,j] && rand() > e1) || (rand() < reputations[person,j] && rand() < e1)
+                actions[person, j] = 0
+            else
+                actions[person, j] = 1
+            end
+        end
+        # Player j
+        if strategies[j] == 1               # ALLC
+            if rand() > e1                  
+                actions[j, person] = 1
+            else
+                actions[j, person] = 0
+            end
+        elseif strategies[j] == 2           # ALLD
+            if rand() > e1
+                actions[j, person] = 0
+            else
+                actions[j, person] = 1
+            end
+        elseif strategies[j] == 3           # NEW_DISC
+            if (rand() > reputations[j,person] && rand() > e1) || (rand() < reputations[j,person] && rand() < e1)
+                actions[j, person] = 0
+            else
+                actions[j, person] = 1
+            end
+        end
+    end
+    return nothing 
+end
+
+# Determine who will interact with who
+function determine_interactions(index, persons_array, num_interactions)
+    i = index
+    N = length(persons_array)
+    first = i - div(num_interactions, 2)
+    last = i + div(num_interactions, 2)
+    if first <= 0
+        first = N + first
+        # find j for those above and below the chosen i
+        if i == 1
+            interactions = [persons_array[ind] for ind in [first:N; i+1:last]]          # getting interactions for 90-100 and then 2-10
+        else
+            interactions = [persons_array[ind] for ind in [first:N; 1:i - 1; i+1:last]] # getting interactions for 9X-100, 1-i, and then i+1-1X
+        end
+    elseif last > N
+        last = last - N
+        if i == N
+            interactions = [persons_array[ind] for ind in [first:i-1; 1:last]]
+        else
+            interactions = [persons_array[ind] for ind in [first:i-1; i+1:N; 1:last]]
+        end
+    else
+        interactions = [persons_array[ind] for ind in [first:i-1 ; i+1:last]]
+    end
+    return interactions
+end
+
+# Determine who will see who
+function sample_observations(person, possible_interactions, interactions_bool)
+    observations = []
+    while length(observations) < M
+        samp = sample(1:length(possible_interactions))  # only sample from possible interactions
+        j = possible_interactions[samp][1]
+        k = possible_interactions[samp][2]
+        if (interactions_bool[j, k] == 1) && (j != person) && (k != person)
+            push!(observations, (j, k))
+        end
+    end
+    return observations
+end
+
+# Evaluate reputations based on observations
+function evaluate_observations(person, observations, reputations, social_norm, actions, good_observations, total_observations)
+    i = person
+    for tupl in observations # Goes through seen observations and evaluate players
+        j = tupl[1]          # Pick a j,k pair
+        k = tupl[2]
+        if rand() > reputations[i,k] # K's reputation in eyes of I
+            r = 0   #bad
+        else
+            r = 1   #good
+        end
+        evaluation = social_norm[actions[j,k]+1, r+1]                              # Calls social norm matrix to see how to assign J
+        good_observations[i,j] += evaluation                                       # Adds to reputation value good count if J was good
+        total_observations[i,j] += 1                                               # Always adds to total observations of J
+        reputations[i,j] = good_observations[i,j] / total_observations[i,j]        # Calculate's J's new reputation in the eyes of I
+
+        if rand() > reputations[i,j] # J's reputation in eyes of I
+            r = 0   #bad
+        else
+            r = 1   #good
+        end
+        evaluation = social_norm[actions[k,j]+1, r+1]                              # Calls social norm matrix to see how to assign K
+        good_observations[i,k] += evaluation                                       # Adds to reputation value good count if K was good
+        total_observations[i,k] += 1                                               # Always adds to total observations of K
+        reputations[i,k] = good_observations[i,k] / total_observations[i,k]        # Calculate's K's new reputation in the eyes of I
+    end
+    return nothing
+end
+
+# Update behavioral strategy
+function update_strategies(fitness, strategies)
+    N = length(fitness)
+    i,j = sample(1:N, 2)    # Two random individuals in population meet
+    if rand() > mu
+        # Compute probability of imitation
+        p = 1. / (1. + exp(-w*(fitness[j]-fitness[i])))
+        # Update strategy with probability linked to fitness
+        if rand() < p
+            strategies[i] = strategies[j]
+        end
+    else
+        strategies[i] = strategies[rand((1,2,3))]
+    end
+    return nothing
+end
+
+
+######################################SIMULATION#################################################################
+
+
+# Initialization of Parameters
+N = 100                     # population size
+b = 5                       # benefit
+c = 1                       # cost
+M = 60                      # number of observations
+
+w = 0.9                     # selection strength for strategy fitness
+social_norm = [1 0; 0 1]    # Stern Judging social norm (use Simple Standing for Viking)
+e1 = 0.02                   # action error
+e2 = 0.02                   # observation error
+mu = 0.01                   # strategy mutation rate
+
+# Simulation parameters
+rounds = 5                  # Days within one generation (R)
+imitation_steps = 1         # How many updated strategy possibilities in one generatiom (T)
+generations = 2000          # Each generation is updated strategy
+repetitions = 3             # Repetition of whole simulation
+num_interactions = 60       # Interaction count per day (X)
+count = 0
+
+#Assign initial strategy frequency possibilities
+vals = 0.0:0.1:1.0
+init_freqs = [ round.([x,y,1-x-y];digits=3) for x in vals, y in vals if x+y<=1 ]
+# Defines any interactions between individuals in the population
+possible_interactions = []
+for j in 1:N-1
+    for k in j+1:N
+        push!(possible_interactions, (j, k))
+    end
+end
+# Loop through different possible initial strategy frequencies
+results_freqs = []          # For each strategy initial frequency, hold the average final strategy proportions across the num of repetitions (avg of results_reps)
+start_freqs = []            # Actual starting freq since is by probability weighting
+for f0 in init_freqs        # Loop through all possible initial strategy frequency combinations
+    results_reps = []       # For each repetition, what final proportion of the population is each strategy
+    start_reps = []
+    for _ in 1:repetitions  
+        # Variables
+        reputations = rand(Float64, (N, N))                     # reputation value randomized in beginning
+        strategies = sample(1:3,Weights(f0),N)                  # strategy assignments: ALLC (1), ALLD (2), or NEW_DISC (3)            
+        fitness = zeros(N)                                      # starts with 0 fitness
+        total_observations = ones(N, N)                         # total number of observations of other people
+        good_observations = reputations                         # total number of good observations of other people            
+        initial_proportions = proportions(strategies,1:3)       # initial % breakdown of strategies
+        push!(all_freqs, initial_proportions)
+        
+        # Loop through num of generations (strategy updating)
+        for _ in tqdm(1:generations)
+            # Interactions and reputations for each day
+            for round in 1:rounds
+                # Clear the interactions and actions that happened for each day
+                interactions_bool = zeros(N,N)     
+                actions = zeros(Int64,N,N)
+
+                # Games each day
+                X = collect(1:N)
+
+                # Randomize who is matched with who
+                shuffle!(X)
+
+                for i in 1:N
+                    # Call function for determining interactions
+                    interactions = determine_interactions(i, X, num_interactions)
+                    person = X[i]
+                    # Call function for game play
+                    process_interactions(person, interactions, interactions_bool, actions, strategies, reputations)
+                end
+
+                # Update fitness
+                for i in 1:N
+                    fitness[i] += sum(b .* actions[:,i] .- c .* actions[i,:])   # calculate fitness after all games for day
+                end
+
+                # Reputations updating
+                for i in 1:N
+                    # Call function to choose oberservations
+                    observations = sample_observations(i, possible_interactions, interactions_bool)
+                    # Call function to change reputations based on observations
+                    evaluate_observations(i, observations, reputations, social_norm, actions, good_observations, total_observations)
+                end
+            
+                #total_observations = ones(N, N)     # Resets total and good oberservations so recent observations count for more
+                #good_observations = reputations
+
+            end
+            
+            # Calculate individuals' average fitnesses across rounds
+            fitness /= rounds*num_interactions
+
+            # Stategy updating
+            for _ in 1:imitation_steps
+                update_strategies(fitness, strategies)
+                # Push all freq steps to CSV
+                temp = proportions(strategies,1:3)
+                push!(all_freqs, temp)
+            end
+        end
+
+        # Update new strategy proportions % breakdown
+        final_proportions = proportions(strategies,1:3)
+        push!(results_reps, final_proportions)
+        push!(start_reps, initial_proportions)
+        push!(all_freqs, final_proportions)
+        push!(all_freqs, "*")
+    end
+    push!(results_freqs, mean(hcat(results_reps...),dims=2))    # Account for average of repetition trials
+    push!(start_freqs, mean(hcat(start_reps...),dims=2))
+
+    push!(all_freqs, "***")
+
+    count +=1
+    print(count)
+end
+
+
+######################################PLOTS#################################################################
+
+# Export results to CSV
+df = DataFrame(A = all_freqs)
+CSV.write("export_df_VaM.csv", df) 
+
+# Histogram of final proportions of strategies
+b_range = range(0, 1.2, length=10)
+p1=histogram([u[1] for u in results_freqs], bins = b_range, color = :orange)
+p2=histogram([u[2] for u in results_freqs], bins = b_range, color = :yellow)
+p3=histogram([u[3] for u in results_freqs], bins = b_range, color = :red)
+plot(p1, p2, p3, layout=(1, 3), label=["ALLC", "ALLD", "DISC"])
+xlims!(0, 1.5)
+ylims!(0, 20)
+
+
+# Which final proportion is highest
+alldcount = 0
+newdisccount = 0
+allccount = 0
+ for row in results_freqs
+    # iterate over each trio of adjacent values in the row
+    for i in 1:length(row)-2
+        # compare the values in the trio
+        a = row[i]
+        b = row[i+1]
+        c = row[i+2]
+        # check which value is the highest
+        if a >= b && a >= c
+            allccount += 1
+        elseif b >= a && b >= c
+            alldcount += 1
+        else
+            newdisccount += 1
+        end
+    end
+end    
+# Bar plot of the highest final prop strategy count values
+y = []
+push!(y, allccount, alldcount, newdisccount)
+bar(y, label = ["ALLC", "ALLD", "DISC"])
+
+print(start_freqs)
+print(results_freqs)
